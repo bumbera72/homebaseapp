@@ -14,7 +14,10 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.kendallhaechten.homebase"
+      "bundleIdentifier": "com.kendallhaechten.homebase",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.kendallhaechten.homebase",

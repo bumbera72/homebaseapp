@@ -8,7 +8,12 @@ import {
   TextInput,
   Platform,
   useWindowDimensions,
+  Keyboard,
+  ActivityIndicator,
 } from "react-native";
+import { createClient, Session } from "@supabase/supabase-js";
+import * as AppleAuthentication from "expo-apple-authentication";
+import * as Crypto from "expo-crypto";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Haptics from "expo-haptics";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
@@ -50,6 +55,17 @@ const STORAGE_KEYS = {
   archive: "homebase:archive:v1",
   shopping: "homebase:shoppingList:v1",
 };
+
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL as string;
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY as string;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: false,
+  },
+});
 
 function todayKeyLocal(d: Date = new Date()): string {
   const y = d.getFullYear();
@@ -149,6 +165,26 @@ export default function HomebaseScreen({ navigation }: Props) {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  const scrollRef = useRef<ScrollView>(null);
+  const [tasksCardY, setTasksCardY] = useState<number>(0);
+
+  // Quick Review is nested inside Brain Dump card, so we need Brain Dump's Y too.
+  const [brainDumpCardY, setBrainDumpCardY] = useState<number>(0);
+  const brainDumpCardYRef = useRef<number>(0);
+
+  // Shopping card Y (for keyboard-safe auto-scroll)
+  const [shoppingCardY, setShoppingCardY] = useState<number>(0);
+  const shoppingCardYRef = useRef<number>(0);
+
+  // Keyboard height (so bottom padding expands and nothing is trapped under the keyboard)
+  const [keyboardHeight, setKeyboardHeight] = useState<number>(0);
+
+  const [quickReviewY, setQuickReviewY] = useState<number>(0);
+  const [pendingScrollToReview, setPendingScrollToReview] = useState(false);
+
   const todayLabel = new Date().toLocaleDateString(undefined, {
     weekday: "long",
     month: "long",
@@ -190,6 +226,28 @@ export default function HomebaseScreen({ navigation }: Props) {
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (mounted) setSession(data.session ?? null);
+      } finally {
+        if (mounted) setAuthLoading(false);
+      }
+    })();
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+
+    return () => {
+      mounted = false;
+      sub.subscription.unsubscribe();
+    };
+  }, []);
 
   async function loadArchiveCountOnly(): Promise<number> {
     try {
@@ -337,6 +395,26 @@ export default function HomebaseScreen({ navigation }: Props) {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep ScrollView padding in sync with the on-screen keyboard so inputs/buttons are never covered.
+  useEffect(() => {
+    const showEvt = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvt = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+    const showSub = Keyboard.addListener(showEvt as any, (e: any) => {
+      const h = e?.endCoordinates?.height ?? 0;
+      setKeyboardHeight(h);
+    });
+
+    const hideSub = Keyboard.addListener(hideEvt as any, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
   }, []);
 
   useFocusEffect(
@@ -649,6 +727,7 @@ export default function HomebaseScreen({ navigation }: Props) {
   function openReviewFromBrainDump() {
     const lines = parseBrainDumpLines(brainText);
     if (lines.length === 0) return;
+    Keyboard.dismiss();
 
     const drafts: DraftTask[] = lines.map((title, idx) => ({
       id: `draft-${Date.now()}-${idx}`,
@@ -661,6 +740,7 @@ export default function HomebaseScreen({ navigation }: Props) {
     setReviewDrafts(drafts);
     setReviewOpen(true);
     Haptics.selectionAsync().catch(() => {});
+    setPendingScrollToReview(true);
   }
 
   function updateReviewDraft(id: string, patch: Partial<DraftTask>) {
@@ -695,6 +775,7 @@ export default function HomebaseScreen({ navigation }: Props) {
   }
 
   async function addReviewToHomebase() {
+    Keyboard.dismiss();
     let existingOnDeck: Task[] = [];
     try {
       const raw = await AsyncStorage.getItem(STORAGE_KEYS.onDeck);
@@ -724,8 +805,25 @@ export default function HomebaseScreen({ navigation }: Props) {
     setReviewDrafts([]);
     setReviewOpen(false);
 
+    setTimeout(() => {
+      scrollRef.current?.scrollTo({ y: Math.max(0, tasksCardY - 12), animated: true });
+    }, 120);
+
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
   }
+  useEffect(() => {
+    if (!pendingScrollToReview) return;
+    if (!reviewOpen) return;
+    if (!quickReviewY) return;
+
+    // Let layout settle before scrolling.
+    const t = setTimeout(() => {
+      scrollRef.current?.scrollTo({ y: Math.max(0, quickReviewY - 12), animated: true });
+      setPendingScrollToReview(false);
+    }, 120);
+
+    return () => clearTimeout(t);
+  }, [pendingScrollToReview, reviewOpen, quickReviewY]);
 
   const { todayFocus, upNext } = useMemo(() => {
     const open = onDeckTasks.filter((t) => !t.done);
@@ -747,23 +845,103 @@ export default function HomebaseScreen({ navigation }: Props) {
         <Text style={styles.h2}>{todayLabel}</Text>
       </View>
 
-      <Pressable
-        onPress={() =>
-          navigation.navigate("Recipes", {
-            selectedId: tonightRecipe?.id ?? null,
-            defaultFilter: "saved",
-            onSelect: (r: RecipeItem) => setTonightRecipe(r),
-          })
-        }
-        style={({ pressed }) => [styles.headerBtn, pressed && styles.pressed]}
-      >
-        <Text style={styles.headerBtnText}>Recipes</Text>
-      </Pressable>
+      <View style={styles.headerRight}>
+        {isLandscape ? (
+          <Pressable
+            onPress={() =>
+              navigation.navigate("Recipes", {
+                selectedId: tonightRecipe?.id ?? null,
+                defaultFilter: "saved",
+                onSelect: (r: RecipeItem) => setTonightRecipe(r),
+              })
+            }
+            style={({ pressed }) => [styles.headerBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.headerBtnText}>Recipes</Text>
+          </Pressable>
+        ) : null}
+
+        <Pressable
+          onPress={() => {
+            if (session) {
+              // simple V1: sign out directly
+              signOut().catch(() => {});
+            } else {
+              signInWithApple().catch(() => {});
+            }
+          }}
+          hitSlop={10}
+          style={({ pressed }) => [styles.accountBtn, pressed && styles.pressed]}
+        >
+          <Text style={styles.accountBtnText}>{session ? "Sign out" : "Sign in"}</Text>
+        </Pressable>
+      </View>
     </View>
   );
+  // ----- Auth helpers -----
+  async function signInWithApple() {
+    try {
+      const available = await AppleAuthentication.isAvailableAsync();
+      if (!available) {
+        alert("Sign in with Apple is only available on Apple devices.");
+        return;
+      }
+
+      // Supabase expects a SHA256 nonce for Apple ID token sign-in.
+      const rawNonce = Crypto.randomUUID();
+      const hashedNonce = await Crypto.digestStringAsync(
+        Crypto.CryptoDigestAlgorithm.SHA256,
+        rawNonce,
+        { encoding: Crypto.CryptoEncoding.HEX }
+      );
+
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+        nonce: hashedNonce,
+      });
+
+      const identityToken = credential.identityToken;
+      if (!identityToken) {
+        alert("Apple sign-in failed: missing identity token.");
+        return;
+      }
+
+      const { error } = await supabase.auth.signInWithIdToken({
+        provider: "apple",
+        token: identityToken,
+        nonce: rawNonce,
+      });
+
+      if (error) {
+        alert(error.message);
+        return;
+      }
+
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    } catch (e: any) {
+      // User cancel is common
+      if (e?.code === "ERR_CANCELED" || e?.code === "ERR_CANCELLED") return;
+      alert(e?.message ?? "Sign in failed.");
+    }
+  }
+
+  async function signOut() {
+    await supabase.auth.signOut();
+    Haptics.selectionAsync().catch(() => {});
+  }
 
   const BrainDumpCard = (
-    <View style={styles.card}>
+    <View
+    style={styles.card}
+    onLayout={(e) => {
+      const y = e.nativeEvent.layout.y;
+      setBrainDumpCardY(y);
+      brainDumpCardYRef.current = y;
+    }}
+  >
       <View style={styles.cardTitleRow}>
         <View style={[styles.cardAccent, { backgroundColor: theme.colors.blush }]} />
         <Text style={styles.cardTitle}>Brain Dump</Text>
@@ -777,6 +955,12 @@ export default function HomebaseScreen({ navigation }: Props) {
         placeholderTextColor={theme.colors.ink3}
         multiline
         style={styles.brainInput}
+        onFocus={() => {
+          // Bring the Brain Dump card up so the Sort & Review / Clear buttons stay visible.
+          setTimeout(() => {
+            scrollRef.current?.scrollTo({ y: Math.max(0, brainDumpCardYRef.current - 16), animated: true });
+          }, 50);
+        }}
       />
 
       <View style={styles.brainBtnRow}>
@@ -806,7 +990,13 @@ export default function HomebaseScreen({ navigation }: Props) {
       </View>
 
       {reviewOpen ? (
-        <View style={styles.reviewCard}>
+        <View
+  style={styles.reviewCard}
+  onLayout={(e) => {
+    const absoluteY = brainDumpCardYRef.current + e.nativeEvent.layout.y;
+    setQuickReviewY(absoluteY);
+  }}
+>
           <View style={styles.reviewHeader}>
             <View style={styles.cardTitleRow}>
               <View style={[styles.cardAccent, { backgroundColor: theme.colors.blush }]} />
@@ -874,7 +1064,14 @@ export default function HomebaseScreen({ navigation }: Props) {
   );
 
   const ShoppingListCard = (
-    <View style={styles.card}>
+    <View
+      style={styles.card}
+      onLayout={(e) => {
+        const y = e.nativeEvent.layout.y;
+        setShoppingCardY(y);
+        shoppingCardYRef.current = y;
+      }}
+    >
       <View style={styles.cardHeader}>
         <View style={styles.cardTitleRow}>
           <View style={[styles.cardAccent, { backgroundColor: theme.colors.mist }]} />
@@ -901,6 +1098,12 @@ export default function HomebaseScreen({ navigation }: Props) {
           style={styles.shoppingInput}
           returnKeyType="done"
           onSubmitEditing={addShoppingItem}
+          onFocus={() => {
+            // Bring the Shopping List card above the keyboard.
+            setTimeout(() => {
+              scrollRef.current?.scrollTo({ y: Math.max(0, shoppingCardYRef.current - 16), animated: true });
+            }, 50);
+          }}
         />
 
         <Pressable onPress={addShoppingItem} style={({ pressed }) => [styles.primaryBtn, styles.shoppingAddBtn, pressed && { opacity: 0.85 }]}>
@@ -939,7 +1142,7 @@ export default function HomebaseScreen({ navigation }: Props) {
   );
 
   const TasksCard = (
-    <View style={styles.card}>
+    <View style={styles.card} onLayout={(e) => setTasksCardY(e.nativeEvent.layout.y)}>
       <View style={styles.cardHeader}>
         <View style={styles.cardTitleRow}>
           <View style={[styles.cardAccent, { backgroundColor: theme.colors.sage }]} />
@@ -1318,12 +1521,57 @@ export default function HomebaseScreen({ navigation }: Props) {
 
   return (
     <View style={styles.screen}>
-      <ScrollView contentContainerStyle={styles.container}>
-        {Header}
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={[styles.container, { paddingBottom: 80 + keyboardHeight }]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+      >
+        {authLoading ? (
+          <View style={{ marginTop: 24, alignItems: "center" }}>
+            <ActivityIndicator />
+          </View>
+        ) : !session ? (
+          <View style={styles.card}>
+            <View style={styles.cardTitleRow}>
+              <View style={[styles.cardAccent, { backgroundColor: theme.colors.sage }]} />
+              <Text style={styles.cardTitle}>Welcome to Homebase</Text>
+            </View>
+            <Text style={styles.helperText}>
+              Sign in with Apple to sync your Homebase across iPhone and iPad.
+            </Text>
+            <Pressable
+              onPress={signInWithApple}
+              style={({ pressed }) => [styles.primaryBtn, { marginTop: 14 }, pressed && { opacity: 0.85 }]}
+            >
+              <Text style={styles.primaryBtnText}>Continue with Apple</Text>
+            </Pressable>
+          </View>
+        ) : null}
+        {session ? Header : null}
 
-        {isLandscape ? (
-          <View style={styles.landscapeRow}>
-            <View style={styles.leftColumn}>
+        {session ? (
+          isLandscape ? (
+            <View style={styles.landscapeRow}>
+              <View style={styles.leftColumn}>
+                <TodayScheduleCard
+                  titleFontFamily={theme.type.h1.fontFamily}
+                  bodyFontFamily={theme.type.body.fontFamily}
+                  uiFontFamily={theme.type.ui.fontFamily}
+                />
+                {TasksCard}
+                {DailyRhythmCard}
+                {TonightCard}
+              </View>
+
+              <View style={styles.rightColumn}>
+                {/* This makes Brain Dump top align with TodayScheduleCard */}
+                <View style={{ marginTop: 0 }}>{BrainDumpCard}</View>
+                {ShoppingListCard}
+              </View>
+            </View>
+          ) : (
+            <>
               <TodayScheduleCard
                 titleFontFamily={theme.type.h1.fontFamily}
                 bodyFontFamily={theme.type.body.fontFamily}
@@ -1332,28 +1580,11 @@ export default function HomebaseScreen({ navigation }: Props) {
               {TasksCard}
               {DailyRhythmCard}
               {TonightCard}
-            </View>
-
-            <View style={styles.rightColumn}>
-              {/* This makes Brain Dump top align with TodayScheduleCard */}
-              <View style={{ marginTop: 0 }}>{BrainDumpCard}</View>
+              {BrainDumpCard}
               {ShoppingListCard}
-            </View>
-          </View>
-        ) : (
-          <>
-            <TodayScheduleCard
-              titleFontFamily={theme.type.h1.fontFamily}
-              bodyFontFamily={theme.type.body.fontFamily}
-              uiFontFamily={theme.type.ui.fontFamily}
-            />
-            {TasksCard}
-            {DailyRhythmCard}
-            {TonightCard}
-            {BrainDumpCard}
-            {ShoppingListCard}
-          </>
-        )}
+            </>
+          )
+        ) : null}
       </ScrollView>
 
       {pickerVisible ? (
@@ -1498,6 +1729,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
+  headerRight: { flexDirection: "row", alignItems: "center", gap: 10 },
   h1: { fontSize: 24, color: theme.colors.ink, ...theme.type.h1 },
   h2: { marginTop: 4, fontSize: 15, color: theme.colors.ink3, ...theme.type.body },
 
@@ -1510,6 +1742,15 @@ const styles = StyleSheet.create({
     backgroundColor: theme.colors.secondaryFill,
   },
   headerBtnText: { color: theme.colors.ink, ...theme.type.ui },
+  accountBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: theme.colors.card,
+  },
+  accountBtnText: { color: theme.colors.ink, ...theme.type.ui },
 
   landscapeRow: { flexDirection: "row", alignItems: "flex-start", marginTop: 12 },
   leftColumn: { flex: 5, paddingRight: 10 },
