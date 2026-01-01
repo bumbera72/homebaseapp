@@ -19,6 +19,7 @@ type Props = {
   titleFontFamily: string; // "Fraunces_700Bold"
   bodyFontFamily: string; // "Inter_500Medium"
   uiFontFamily: string; // "Inter_600SemiBold" or "Inter_700Bold"
+  nowOverride?: Date;
 };
 
 type CalEvent = {
@@ -37,13 +38,13 @@ const STORAGE_KEYS = {
   writeCalendarId: "homebase:cal:writeCalendarId:v1",
 };
 
-function startOfToday() {
-  const d = new Date();
+function startOfDay(base: Date) {
+  const d = new Date(base);
   d.setHours(0, 0, 0, 0);
   return d;
 }
-function endOfToday() {
-  const d = new Date();
+function endOfDay(base: Date) {
+  const d = new Date(base);
   d.setHours(23, 59, 59, 999);
   return d;
 }
@@ -66,7 +67,8 @@ function fmtDateLine(dt: Date) {
   return dt.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 }
 
-export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiFontFamily }: Props) {
+export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiFontFamily, nowOverride }: Props) {
+  const now = nowOverride ?? new Date();
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [writeCalId, setWriteCalId] = useState<string | null>(null);
@@ -79,7 +81,7 @@ export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiF
   const [addOpen, setAddOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newNotes, setNewNotes] = useState("");
-  const [newStart, setNewStart] = useState<Date>(() => roundToNext30(new Date()));
+  const [newStart, setNewStart] = useState<Date>(() => roundToNext30(now));
   const [durationMin, setDurationMin] = useState<number>(60);
   const [pickerVisible, setPickerVisible] = useState(false);
 
@@ -160,7 +162,7 @@ export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiF
         return;
       }
 
-      const result = await Calendar.getEventsAsync(ids, startOfToday(), endOfToday());
+      const result = await Calendar.getEventsAsync(ids, startOfDay(now), endOfDay(now));
 
       const mapped: CalEvent[] = (result || [])
         .filter((e) => !!e.startDate && !!e.endDate)
@@ -187,19 +189,28 @@ export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiF
   function openAdd() {
     setNewTitle("");
     setNewNotes("");
-    setNewStart(roundToNext30(new Date()));
+    setNewStart(roundToNext30(now));
     setDurationMin(60);
     setPickerVisible(false);
     setAddOpen(true);
   }
 
   async function createEvent() {
+    // Ensure permissions (simulator sometimes starts with no permission)
+    const ok = permissionGranted || (await requestPermission());
+    if (!ok) return;
+
     if (!writeCalId) return;
+
     const title = newTitle.trim();
     if (!title) return;
 
-    const startDate = newStart;
-    const endDate = new Date(startDate.getTime() + durationMin * 60 * 1000);
+    // Use the chosen start time-of-day, but anchor the date to `now` (supports screenshot mode override)
+    const startDate = new Date(now);
+    startDate.setHours(newStart.getHours(), newStart.getMinutes(), 0, 0);
+
+    const endDate = new Date(startDate);
+    endDate.setMinutes(endDate.getMinutes() + durationMin);
 
     try {
       await Calendar.createEventAsync(writeCalId, {
@@ -210,6 +221,8 @@ export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiF
         timeZone: undefined,
       });
       setAddOpen(false);
+      setNewTitle("");
+      setNewNotes("");
       await refresh();
     } catch {
       // silent for now; we can add a toast later
@@ -305,7 +318,7 @@ export default function TodayScheduleCard({ titleFontFamily, bodyFontFamily, uiF
     await refresh();
   }
 
-  const todayLine = fmtDateLine(new Date());
+  const todayLine = fmtDateLine(now);
 
   return (
     <View style={styles.card}>

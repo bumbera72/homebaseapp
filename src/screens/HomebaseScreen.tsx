@@ -11,6 +11,8 @@ import {
   Keyboard,
   ActivityIndicator,
 } from "react-native";
+import * as Device from "expo-device";
+import Constants from "expo-constants";
 import { createClient, Session } from "@supabase/supabase-js";
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as Crypto from "expo-crypto";
@@ -67,6 +69,21 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   },
 });
 
+// Dev helper to unblock App Store screenshots.
+// IMPORTANT: the manual override should work even if __DEV__ is unexpectedly false.
+const SCREENSHOT_MODE =
+  process.env.EXPO_PUBLIC_SCREENSHOT_MODE === "1" ||
+  (__DEV__ &&
+    Platform.OS === "ios" &&
+    (
+      // Expo Go / Store client
+      Constants.appOwnership === "expo" ||
+      // iOS Simulator
+      Device.isDevice === false
+    ));
+
+    
+
 function todayKeyLocal(d: Date = new Date()): string {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -119,11 +136,11 @@ function seasonalEmoji(d: Date = new Date()): string {
   return "✨";
 }
 
-function greetingWithName(firstName?: string) {
-  const hour = new Date().getHours();
+function greetingWithName(firstName?: string, now: Date = new Date()) {
+  const hour = now.getHours();
   const g = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const namePart = firstName ? `, ${firstName}` : "";
-  return `${g}${namePart} ${seasonalEmoji()}`;
+  return `${g}${namePart} ${seasonalEmoji(now)}`;
 }
 
 function inferCategory(title: string): BrainCategory {
@@ -185,13 +202,16 @@ export default function HomebaseScreen({ navigation }: Props) {
   const [quickReviewY, setQuickReviewY] = useState<number>(0);
   const [pendingScrollToReview, setPendingScrollToReview] = useState(false);
 
-  const todayLabel = new Date().toLocaleDateString(undefined, {
+  // Screenshot-only date override (for App Store screenshots). Real users always use the real date.
+  const NOW = SCREENSHOT_MODE ? new Date("2024-04-16T14:00:00") : new Date();
+
+  const todayLabel = NOW.toLocaleDateString(undefined, {
     weekday: "long",
     month: "long",
     day: "numeric",
   });
 
-  const todayKey = useMemo(() => todayKeyLocal(), []);
+  const todayKey = useMemo(() => todayKeyLocal(NOW), [SCREENSHOT_MODE]);
 
   const [onDeckTasks, setOnDeckTasks] = useState<Task[]>(DEFAULT_ON_DECK);
   const [laterTasks, setLaterTasks] = useState<DraftTask[]>([]);
@@ -228,6 +248,12 @@ export default function HomebaseScreen({ navigation }: Props) {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    if (SCREENSHOT_MODE) {
+      // Pretend we're signed in so the dashboard renders for screenshots.
+      setSession({ user: { id: "screenshot" } } as any);
+      setAuthLoading(false);
+      return;
+    }
     let mounted = true;
 
     (async () => {
@@ -841,7 +867,7 @@ export default function HomebaseScreen({ navigation }: Props) {
   const Header = (
     <View style={styles.headerWrap}>
       <View>
-        <Text style={styles.h1}>{greetingWithName("Kendall")}</Text>
+        <Text style={styles.h1}>{greetingWithName(undefined, NOW)}</Text>
         <Text style={styles.h2}>{todayLabel}</Text>
       </View>
 
@@ -1501,7 +1527,7 @@ export default function HomebaseScreen({ navigation }: Props) {
                         navigation.navigate("Cooking", { recipe: tonightRecipe! });
                       }
                     }}
-                    style={({ pressed }) => [styles.primaryBtn, pressed && { opacity: 0.85 }]}
+                    style={({ pressed }) => [styles.primaryBtn, { marginTop: 12 }, pressed && { opacity: 0.85 }]}
                   >
                     <Text style={styles.primaryBtnText}>{primaryLabel}</Text>
                   </Pressable>
@@ -1531,7 +1557,7 @@ export default function HomebaseScreen({ navigation }: Props) {
           <View style={{ marginTop: 24, alignItems: "center" }}>
             <ActivityIndicator />
           </View>
-        ) : !session ? (
+        ) : !session && !SCREENSHOT_MODE ? (
           <View style={styles.card}>
             <View style={styles.cardTitleRow}>
               <View style={[styles.cardAccent, { backgroundColor: theme.colors.sage }]} />
@@ -1548,9 +1574,10 @@ export default function HomebaseScreen({ navigation }: Props) {
             </Pressable>
           </View>
         ) : null}
-        {session ? Header : null}
+        {(session || SCREENSHOT_MODE) ? Header : null}
 
-        {session ? (
+        {/* Debug info removed */}
+        {(session || SCREENSHOT_MODE) ? (
           isLandscape ? (
             <View style={styles.landscapeRow}>
               <View style={styles.leftColumn}>
@@ -1558,7 +1585,8 @@ export default function HomebaseScreen({ navigation }: Props) {
                   titleFontFamily={theme.type.h1.fontFamily}
                   bodyFontFamily={theme.type.body.fontFamily}
                   uiFontFamily={theme.type.ui.fontFamily}
-                />
+                  nowOverride={NOW}
+              />
                 {TasksCard}
                 {DailyRhythmCard}
                 {TonightCard}
@@ -1576,6 +1604,7 @@ export default function HomebaseScreen({ navigation }: Props) {
                 titleFontFamily={theme.type.h1.fontFamily}
                 bodyFontFamily={theme.type.body.fontFamily}
                 uiFontFamily={theme.type.ui.fontFamily}
+                nowOverride={NOW}
               />
               {TasksCard}
               {DailyRhythmCard}

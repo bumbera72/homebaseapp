@@ -1,10 +1,13 @@
 import React, { useMemo, useState } from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { View, Text, TextInput, Pressable, Alert, StyleSheet } from "react-native";
 import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LinkRecipe, RootStackParamList } from "../../App";
 import { theme } from "../ui/theme";
 
 type Props = NativeStackScreenProps<RootStackParamList, "AddRecipeLink">;
+
+const RECIPE_STORAGE_KEY = "homebase:recipes:v3";
 
 function isValidUrl(url: string) {
   const u = url.trim();
@@ -26,7 +29,7 @@ export default function AddRecipeLinkScreen({ route, navigation }: Props) {
 
   const canSave = useMemo(() => isValidUrl(url), [url]);
 
-  function save() {
+  async function save() {
     if (!canSave) {
       Alert.alert("Almost!", "Paste a valid link (must start with https://).");
       return;
@@ -41,6 +44,16 @@ export default function AddRecipeLinkScreen({ route, navigation }: Props) {
       url: url.trim(),
       favorite: false,
     };
+
+    // Persist to the saved recipes library so "Choose a recipe" is real for users.
+    try {
+      const raw = await AsyncStorage.getItem(RECIPE_STORAGE_KEY);
+      const existing = raw ? (JSON.parse(raw) as any[]) : [];
+      const next = [recipe, ...existing.filter((r) => r?.id !== recipe.id && r?.url !== recipe.url)];
+      await AsyncStorage.setItem(RECIPE_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // ignore
+    }
 
     route.params.onCreate(recipe);
     navigation.goBack();
