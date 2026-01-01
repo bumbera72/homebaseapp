@@ -2,7 +2,7 @@
   "expo": {
     "name": "Homebase",
     "slug": "homebase",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -15,8 +15,12 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.kendallhaechten.homebase",
+      "buildNumber": "2",
+      "usesAppleSignIn": true,
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCalendarsUsageDescription": "Homebase uses your calendar to show today’s schedule and let you add events.",
+        "NSRemindersUsageDescription": "Homebase can access reminders to help you manage tasks."
       }
     },
     "android": {
@@ -32,7 +36,8 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      "expo-apple-authentication"
     ],
     "extra": {
       "eas": {
