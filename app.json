@@ -2,7 +2,7 @@
   "expo": {
     "name": "Homebase",
     "slug": "homebase",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -10,17 +10,21 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#FBF7F2"
+      "backgroundColor": "#B7C6B8"
     },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.kendallhaechten.homebase",
-      "buildNumber": "2",
+      "buildNumber": "12",
       "usesAppleSignIn": true,
+      "config": {
+        "usesNonExemptEncryption": false
+      },
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false,
-        "NSCalendarsUsageDescription": "Homebase uses your calendar to show today’s schedule and let you add events.",
-        "NSRemindersUsageDescription": "Homebase can access reminders to help you manage tasks."
+        "NSCalendarsUsageDescription": "Homebase uses your calendar to display the events you choose inside the app and help you plan your day (for example, showing upcoming appointments, school drop-offs, and family activities alongside your tasks). Homebase only reads calendar event details to show them in your schedule view.",
+        "NSCalendarsFullAccessUsageDescription": "Homebase uses your calendar to display the events you choose inside the app and help you plan your day (for example, showing upcoming appointments, school drop-offs, and family activities alongside your tasks). Homebase only reads calendar event details to show them in your schedule view.",
+        "NSCalendarsWriteOnlyAccessUsageDescription": "Homebase uses calendar write access only when you choose to add or update an event from within the app (for example, adding a family activity or appointment from your planning screen).",
+        "NSRemindersUsageDescription": "Homebase uses reminders to sync your to-dos into the app (for example: groceries, pickups, and recurring household tasks) so you can manage everything from your dashboard."
       }
     },
     "android": {

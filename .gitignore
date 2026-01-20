@@ -38,3 +38,5 @@ yarn-error.*
 
 # generated native folders
 /android
+
+echo ".vscode/" >> .gitignore

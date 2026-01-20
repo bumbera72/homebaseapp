@@ -44,14 +44,14 @@ export type Task = {
   done: boolean;
   category?: BrainCategory;
   dueDateKey?: string; // YYYY-MM-DD (local)
-  plan?: "today" | "upnext"; // NEW: focus vs just active
+  plan?: "today" | "upnext"; // focus vs just active
   urgency?: "low" | "normal" | "urgent";
 };
 
 export type ArchivedTask = {
-  id: string;              // unique archive id
+  id: string; // unique archive id
   title: string;
-  category?: BrainCategory; // keep if you have it
+  category?: BrainCategory;
   completedDateKey: string; // YYYY-MM-DD (local)
 };
 

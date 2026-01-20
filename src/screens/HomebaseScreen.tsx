@@ -2,14 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
+  Image,
   ScrollView,
   Pressable,
   StyleSheet,
   TextInput,
   Platform,
+  NativeModules,
   useWindowDimensions,
   Keyboard,
+  KeyboardAvoidingView,
   ActivityIndicator,
+  Alert,
+  Linking,
+  findNodeHandle,
 } from "react-native";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
@@ -25,6 +31,7 @@ import { NativeStackScreenProps } from "@react-navigation/native-stack";
 import TodayScheduleCard from "../ui/TodayScheduleCard";
 import EmptyState from "../ui/EmptyState";
 import { theme } from "../ui/theme";
+
 
 import {
   RootStackParamList,
@@ -61,14 +68,43 @@ const STORAGE_KEYS = {
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL as string;
 const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY as string;
 
+// In‑App Purchase product IDs (must match App Store Connect)
+const IAP_PRODUCT_IDS = ["homebase.monthly", "homebase.yearly"] as const;
+
+// Policy links shown in-app
+const PRIVACY_URL = "https://thehomebaseapp.com/privacy-policy";
+const TERMS_URL = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/";
+const DELETE_ACCOUNT_URL = "https://thehomebaseapp.com/delete-account";
+
+// Paywall timing: let users experience Homebase before prompting to subscribe
+const HB_PAYWALL_OPENS_KEY = "homebase:paywall:opens:v1";
+const HB_PAYWALL_MIN_OPENS = 3;
+
+// App Review override: set EXPO_PUBLIC_REVIEW_MODE=1 in your EAS build env to show the paywall immediately.
+const HB_REVIEW_MODE = process.env.EXPO_PUBLIC_REVIEW_MODE === "1";
+const HB_PAYWALL_MIN_OPENS_EFFECTIVE = HB_REVIEW_MODE ? 1 : HB_PAYWALL_MIN_OPENS;
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
+    storage: AsyncStorage,
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: false,
   },
 });
 
+// react-native-iap is a native module and will crash in Expo Go (NitroModules not supported).
+// We load it dynamically only in dev builds / TestFlight where native modules exist.
+function getIapModule(): any | null {
+  try {
+    // Expo Go / Store client
+    if (Constants.appOwnership === "expo") return null;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require("react-native-iap");
+  } catch {
+    return null;
+  }
+}
 // Dev helper to unblock App Store screenshots.
 // IMPORTANT: the manual override should work even if __DEV__ is unexpectedly false.
 const SCREENSHOT_MODE =
@@ -185,7 +221,59 @@ export default function HomebaseScreen({ navigation }: Props) {
   const [session, setSession] = useState<Session | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
+  // Email/Password auth (for App Review + non-Apple sign in)
+const [authMode, setAuthMode] = useState<"apple" | "email">("apple");
+const [authIsSignUp, setAuthIsSignUp] = useState(false);
+const [authEmail, setAuthEmail] = useState("");
+const [authPassword, setAuthPassword] = useState("");
+const [authBusy, setAuthBusy] = useState(false);
+const [authError, setAuthError] = useState<string | null>(null);
+
+  // Subscription (IAP) gate
+  const [iapLoading, setIapLoading] = useState(false);
+  const [entitled, setEntitled] = useState(false);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const [subscriptionProducts, setSubscriptionProducts] = useState<any[]>([]);
+  const [shouldShowPaywall, setShouldShowPaywall] = useState(false);
+  const [iapDebug, setIapDebug] = useState<string>("");
+
+    // Native iOS SubscriptionStoreView wrapper (presented from RN)
+  const { SubscriptionPaywallModule } = NativeModules as any;
+
+  // Legacy wrapper kept for older call sites.
+  // IMPORTANT: Do not initiate purchases from React Native. Use Apple’s native SubscriptionStoreView.
+  function openSubscriptionStoreView(_fallbackProductId?: string) {
+    const hasNative = Platform.OS === "ios" && !!SubscriptionPaywallModule?.present;
+
+    if (!hasNative) {
+      Alert.alert(
+        "Subscriptions unavailable",
+        "The subscription screen is not available in this build. Please update the app and try again."
+      );
+      return;
+    }
+
+    try {
+      SubscriptionPaywallModule.present();
+    } catch (e: any) {
+      console.log("HB native paywall present() error:", e);
+      Alert.alert("Subscriptions unavailable", "Unable to open the subscription screen.");
+    }
+  }
+
+// Treat the user as entitled until we intentionally show the paywall
+const effectiveEntitled =
+  SCREENSHOT_MODE ? true : entitled || !shouldShowPaywall;
+
   const scrollRef = useRef<ScrollView>(null);
+  function scrollAuthFieldIntoView(fieldRef: React.RefObject<TextInput>) {
+  const node = fieldRef.current ? findNodeHandle(fieldRef.current) : null;
+  if (!node) return;
+
+  const responder: any = (scrollRef.current as any)?.getScrollResponder?.();
+  const fn = responder?.scrollResponderScrollNativeHandleToKeyboard;
+  if (typeof fn === "function") fn(node, 120, true);
+}
   const [tasksCardY, setTasksCardY] = useState<number>(0);
 
   // Quick Review is nested inside Brain Dump card, so we need Brain Dump's Y too.
@@ -246,6 +334,7 @@ export default function HomebaseScreen({ navigation }: Props) {
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [loaded, setLoaded] = useState(false);
+  const [storageLoadError, setStorageLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (SCREENSHOT_MODE) {
@@ -274,6 +363,45 @@ export default function HomebaseScreen({ navigation }: Props) {
       sub.subscription.unsubscribe();
     };
   }, []);
+
+  // Delay paywall until the user has opened Homebase a few times
+useEffect(() => {
+  if (SCREENSHOT_MODE) {
+    setShouldShowPaywall(false);
+    return;
+  }
+  if (!session) {
+    setShouldShowPaywall(false);
+    return;
+  }
+
+    if (HB_REVIEW_MODE) {
+    // In App Review we want the paywall to show immediately so reviewers can test purchases.
+    setShouldShowPaywall(true);
+    return;
+  }
+
+  let alive = true;
+  (async () => {
+    try {
+      const raw = await AsyncStorage.getItem(HB_PAYWALL_OPENS_KEY);
+      const current = raw ? Number(raw) : 0;
+      const next = Number.isFinite(current) ? current + 1 : 1;
+
+      await AsyncStorage.setItem(HB_PAYWALL_OPENS_KEY, String(next));
+      if (!alive) return;
+
+      setShouldShowPaywall(next >= HB_PAYWALL_MIN_OPENS_EFFECTIVE);
+    } catch {
+      if (!alive) return;
+      setShouldShowPaywall(false);
+    }
+  })();
+
+  return () => {
+    alive = false;
+  };
+}, [session]);
 
   async function loadArchiveCountOnly(): Promise<number> {
     try {
@@ -413,13 +541,31 @@ export default function HomebaseScreen({ navigation }: Props) {
   }, [shoppingItems, loaded]);
 
   useEffect(() => {
+    let cancelled = false;
+
     (async () => {
       try {
-        await loadFromStorage();
+        setStorageLoadError(null);
+
+        // Fail-safe: if AsyncStorage hangs or the device is slow, don’t block the UI forever.
+        await Promise.race([
+          loadFromStorage(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("storage_load_timeout")), 8000)
+          ),
+        ]);
+      } catch (e: any) {
+        if (cancelled) return;
+        const msg = String(e?.message ?? e ?? "storage_load_failed");
+        setStorageLoadError(msg);
       } finally {
-        setLoaded(true);
+        if (!cancelled) setLoaded(true);
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -904,7 +1050,507 @@ export default function HomebaseScreen({ navigation }: Props) {
       </View>
     </View>
   );
+  
+  // ----- Subscription helpers (react-native-iap) -----
+  async function fetchSubscriptions() {
+    const IAP = getIapModule();
+    if (!IAP) return [];
+
+    // Ensure the connection is initialized before fetching products
+    try {
+      await IAP.initConnection?.();
+    } catch {
+      // ignore
+    }
+
+    // react-native-iap has had a few API shapes over versions.
+    // Try multiple shapes + a getProducts fallback.
+    const skus = [...IAP_PRODUCT_IDS] as any;
+
+    // Newer versions: getSubscriptions({ skus })
+    try {
+      if (typeof IAP.getSubscriptions === "function") {
+        const res = await IAP.getSubscriptions({ skus } as any);
+        if (Array.isArray(res) && res.length) return res;
+      }
+    } catch {
+      // fall through
+    }
+
+    // Older versions: getSubscriptions(skus)
+    try {
+      if (typeof IAP.getSubscriptions === "function") {
+        const res = await IAP.getSubscriptions(skus);
+        if (Array.isArray(res) && res.length) return res;
+      }
+    } catch {
+      // fall through
+    }
+
+    // Fallback: some versions expose subscriptions via getProducts
+    try {
+      if (typeof IAP.getProducts === "function") {
+        const res = await IAP.getProducts({ skus } as any);
+        if (Array.isArray(res) && res.length) return res;
+      }
+    } catch {
+      // ignore
+    }
+
+    return [];
+  }
+
+  async function requestSubscriptionCompat(productId: string) {
+    const IAP = getIapModule();
+    if (!IAP) {
+      throw new Error(
+        "Subscriptions require a TestFlight/dev build (Expo Go can’t process purchases)."
+      );
+    }
+
+    // Make sure the native connection is ready (button taps can happen before the effect finishes)
+    try {
+      await IAP.initConnection?.();
+    } catch {
+      // ignore
+    }
+
+    // iOS: rn-iap often expects the iOS flag to be present on purchase requests.
+    // (If the lib doesn't recognize the key, it will be ignored.)
+    const iosOpts = { andDangerouslyFinishTransactionAutomaticallyIOS: false } as any;
+
+    // Prefer requestSubscription if available.
+    if (typeof IAP.requestSubscription === "function") {
+      // react-native-iap has changed request shapes across versions.
+      // Try the most common shapes in order.
+
+      // Shape A: flat object { sku, ... }
+      const reqA = { sku: productId, ...iosOpts } as any;
+
+      // Shape B (newer convention): platform-nested object
+      const reqB = {
+        ios: { sku: productId, ...iosOpts },
+        android: { sku: productId },
+      } as any;
+
+      try {
+        return await IAP.requestSubscription(reqA);
+      } catch (eA: any) {
+        try {
+          return await IAP.requestSubscription(reqB);
+        } catch (eB: any) {
+          // Shape C: string sku for older versions
+          return await IAP.requestSubscription(productId as any);
+        }
+      }
+    }
+
+    // Fallback: requestPurchase is used for subscriptions in some older versions.
+    if (typeof IAP.requestPurchase === "function") {
+      const reqA = { sku: productId, ...iosOpts } as any;
+      const reqB = { ios: { sku: productId, ...iosOpts }, android: { sku: productId } } as any;
+      try {
+        return await IAP.requestPurchase(reqA);
+      } catch {
+        try {
+          return await IAP.requestPurchase(reqB);
+        } catch {
+          return await IAP.requestPurchase(productId as any);
+        }
+      }
+    }
+
+    throw new Error("In-app purchase module not available.");
+  }
+
+  async function refreshEntitlement() {
+    const IAP = getIapModule();
+    if (!IAP) {
+      // In Expo Go we can still show the paywall UI, but we cannot check real purchases.
+      setEntitled(false);
+      return;
+    }
+
+    try {
+      // Some versions require initConnection before queries.
+      try {
+        await IAP.initConnection?.();
+      } catch {}
+
+      const purchases = await IAP.getAvailablePurchases();
+      const has = purchases?.some?.((p: any) => IAP_PRODUCT_IDS.includes(p.productId as any)) ?? false;
+      setEntitled(!!has);
+    } catch {
+      setEntitled(false);
+    }
+  }
+
+  function openNativeSubscriptionPaywall() {
+  const { SubscriptionPaywallModule } = NativeModules as any;
+  const hasNative = Platform.OS === "ios" && !!SubscriptionPaywallModule?.present;
+
+  if (!hasNative) {
+    Alert.alert(
+      "Subscriptions unavailable",
+      "The subscription screen is not available in this build. Please update the app and try again."
+    );
+    return;
+  }
+
+  try {
+    SubscriptionPaywallModule.present();
+  } catch (e: any) {
+    console.log("HB native paywall present() error:", e);
+    Alert.alert("Subscriptions unavailable", "Unable to open the subscription screen.");
+  }
+}
+
+  async function startSubscription(productId: string) {
+    setBillingError(null);
+
+    // IMPORTANT (App Store): On iOS we do not initiate purchases from React Native.
+    // Always route to Apple’s native SubscriptionStoreView paywall.
+    if (Platform.OS === "ios") {
+      openNativeSubscriptionPaywall();
+      return;
+    }
+
+    try {
+      setIapLoading(true);
+      const IAP = getIapModule();
+      try {
+        await IAP?.initConnection?.();
+      } catch {}
+
+      // Ensure we have product metadata loaded (helps prevent iOS "Missing purchase request configuration")
+      if (subscriptionProducts.length === 0) {
+        const subs = await fetchSubscriptions();
+        setSubscriptionProducts(subs);
+
+        const ids = Array.isArray(subs)
+  ? subs.map((s: any) => s?.productId ?? s?.sku ?? s?.productID ?? "?").slice(0, 4)
+  : [];
+
+setIapDebug(
+  `ownership=${Constants.appOwnership} subs=${Array.isArray(subs) ? subs.length : 0} ids=${ids.join(",")}`
+);
+
+        console.log("HB IAP subs:", Array.isArray(subs) ? subs.length : subs, subs);
+
+        if (!subs || subs.length === 0) {
+          // Don’t block purchase attempts just because product metadata didn’t load.
+          // In App Review / sandbox, product fetching can be flaky, but the purchase sheet may still work.
+          setSubscriptionProducts([]);
+        }
+      }
+
+      // Attempt purchase even if product metadata is empty; surface any StoreKit error to the reviewer.
+      await requestSubscriptionCompat(productId);
+    } catch (e: any) {
+      const code = String(e?.code ?? "");
+      const msg = String(e?.message ?? "Could not start subscription.");
+      const full = code ? `${msg} (code: ${code})` : msg;
+      if (code.includes("CANCEL") || msg.toLowerCase().includes("cancel")) return;
+      setBillingError(full);
+      if (HB_REVIEW_MODE) {
+        setIapDebug((prev) => (prev ? `${prev} | lastErr=${full}` : `lastErr=${full}`));
+      }
+    } finally {
+      setIapLoading(false);
+    }
+  }
+
+  async function restorePurchases() {
+    setBillingError(null);
+    try {
+      setIapLoading(true);
+      await refreshEntitlement();
+      setTimeout(() => {
+        setEntitled((prev) => {
+          if (!prev) setBillingError("No active subscription found for this Apple ID.");
+          return prev;
+        });
+      }, 50);
+    } finally {
+      setIapLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (SCREENSHOT_MODE) {
+      // Don’t block App Store screenshots behind billing.
+      setEntitled(true);
+      return;
+    }
+
+      // Don’t initialize billing until we intend to show the paywall
+  if (!shouldShowPaywall) {
+    return;
+  }
+
+    const IAP = getIapModule();
+    if (!IAP) {
+      // Expo Go: app should still run; paywall can show, but purchases won’t.
+      setEntitled(false);
+      return;
+    }
+
+    let purchaseSub: any;
+    let errorSub: any;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setIapLoading(true);
+        const ok = await IAP.initConnection();
+        if (!ok) throw new Error("Billing unavailable");
+        if (cancelled) return;
+
+        const subs = await fetchSubscriptions();
+        setSubscriptionProducts(subs);
+
+        await refreshEntitlement();
+
+        purchaseSub = IAP.purchaseUpdatedListener(async (purchase: any) => {
+          try {
+            await IAP.finishTransaction({ purchase, isConsumable: false });
+          } catch {}
+          await refreshEntitlement();
+        });
+
+        errorSub = IAP.purchaseErrorListener((err: any) => {
+          setBillingError(err?.message ?? "Purchase failed");
+        });
+      } catch (e: any) {
+        setBillingError(e?.message ?? "Billing error");
+      } finally {
+        setIapLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      try { purchaseSub?.remove?.(); } catch {}
+      try { errorSub?.remove?.(); } catch {}
+      try { IAP.endConnection(); } catch {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldShowPaywall]);
+
+  // Never render a blank screen: while auth is initializing, show a lightweight loader.
+  // IMPORTANT: this must be after all hooks so hook order never changes between renders.
+  if (authLoading) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: theme.colors.bg,
+          padding: 24,
+        }}
+      >
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
+
+  // After sign-in, we hydrate from AsyncStorage. If hydration is slow or fails,
+  // show a friendly loader with a continue/retry path so users never get stuck.
+  if (session && !loaded) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: theme.colors.bg,
+          padding: 24,
+        }}
+      >
+        <ActivityIndicator size="large" />
+        <Text style={{ marginTop: 14, color: theme.colors.ink2, textAlign: "center" }}>
+          Setting up your Homebase…
+        </Text>
+        {storageLoadError ? (
+          <Text style={{ marginTop: 10, color: theme.colors.ink3, textAlign: "center" }}>
+            {"Taking longer than expected. You can continue now — we’ll load the rest in the background."}
+          </Text>
+        ) : null}
+
+        {storageLoadError ? (
+          <View style={{ width: "100%", marginTop: 16 }}>
+            <Pressable
+              onPress={() => {
+                // Allow UI through using safe defaults already in state.
+                setLoaded(true);
+              }}
+              style={({ pressed }) => [
+                styles.primaryBtn,
+                { width: "100%" },
+                pressed && { opacity: 0.85 },
+              ]}
+            >
+              <Text style={styles.primaryBtnText}>Continue</Text>
+            </Pressable>
+
+            <Pressable
+              onPress={() => {
+                // Retry hydration once.
+                setLoaded(false);
+                setTimeout(() => {
+                  (async () => {
+                    try {
+                      setStorageLoadError(null);
+                      await Promise.race([
+                        loadFromStorage(),
+                        new Promise((_, reject) =>
+                          setTimeout(() => reject(new Error("storage_load_timeout")), 8000)
+                        ),
+                      ]);
+                    } catch (e: any) {
+                      const msg = String(e?.message ?? e ?? "storage_load_failed");
+                      setStorageLoadError(msg);
+                    } finally {
+                      setLoaded(true);
+                    }
+                  })();
+                }, 50);
+              }}
+              style={({ pressed }) => [
+                styles.secondaryBtn,
+                { width: "100%", marginTop: 10 },
+                pressed && styles.pressed,
+              ]}
+            >
+              <Text style={styles.secondaryBtnText}>Retry loading</Text>
+            </Pressable>
+          </View>
+        ) : null}
+      </View>
+    );
+  }
+
   // ----- Auth helpers -----
+  function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+async function signInWithEmailPassword() {
+  const email = normalizeEmail(authEmail);
+  const password = authPassword.trim();
+
+  if (!email || !password) {
+    setAuthError("Please enter your email and password.");
+    return;
+  }
+
+  try {
+    setAuthBusy(true);
+    setAuthError(null);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  } catch (e: any) {
+    const rawMsg = String(e?.message ?? "Couldn’t sign in.");
+    const msgLower = rawMsg.toLowerCase();
+
+    // Supabase often returns this generic error when the email isn’t confirmed yet.
+    // Provide a clearer next step.
+    if (msgLower.includes("invalid login credentials")) {
+      const friendly =
+        "Invalid login credentials. If you just created this account, you may need to confirm your email first. Tap ‘Resend confirmation’ or check your inbox.";
+      setAuthError(friendly);
+      Alert.alert("Sign in failed", friendly);
+      return;
+    }
+
+    setAuthError(rawMsg);
+    Alert.alert("Sign in failed", rawMsg);
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+async function signUpWithEmailPassword() {
+  const email = normalizeEmail(authEmail);
+  const password = authPassword.trim();
+
+  if (!email || !password) {
+    setAuthError("Please enter your email and password.");
+    return;
+  }
+
+  if (password.length < 6) {
+    setAuthError("Password must be at least 6 characters.");
+    return;
+  }
+
+  try {
+    setAuthBusy(true);
+    setAuthError(null);
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
+
+    Alert.alert(
+      "Account created",
+      "You can sign in now. If you’re asked to confirm your email, check your inbox."
+    );
+    setAuthIsSignUp(false);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  } catch (e: any) {
+    const msg = e?.message ?? "Couldn’t create account.";
+    setAuthError(msg);
+    Alert.alert("Sign up failed", msg);
+  } finally {
+    setAuthBusy(false);
+  }
+}
+async function resendConfirmationEmail() {
+  const email = normalizeEmail(authEmail);
+  if (!email) {
+    setAuthError("Enter your email so we can resend the confirmation.");
+    return;
+  }
+
+  try {
+    setAuthBusy(true);
+    setAuthError(null);
+    // Supabase will resend the signup confirmation email if confirmations are enabled.
+    // If confirmations are disabled, this will be a no-op or return an informative error.
+    const { error } = await supabase.auth.resend({ type: "signup", email });
+    if (error) throw error;
+    Alert.alert("Email sent", "Check your inbox for the confirmation email, then come back and sign in.");
+  } catch (e: any) {
+    const msg = e?.message ?? "Couldn’t resend confirmation email.";
+    setAuthError(msg);
+    Alert.alert("Resend failed", msg);
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+async function sendPasswordReset() {
+  const email = normalizeEmail(authEmail);
+  if (!email) {
+    setAuthError("Enter your email so we can send a reset link.");
+    return;
+  }
+
+  try {
+    setAuthBusy(true);
+    setAuthError(null);
+    const { error } = await supabase.auth.resetPasswordForEmail(email);
+    if (error) throw error;
+    Alert.alert("Reset email sent", "Check your inbox for a password reset link.");
+  } catch (e: any) {
+    const msg = e?.message ?? "Couldn’t send reset email.";
+    setAuthError(msg);
+    Alert.alert("Reset failed", msg);
+  } finally {
+    setAuthBusy(false);
+  }
+}
   async function signInWithApple() {
     try {
       const available = await AppleAuthentication.isAvailableAsync();
@@ -1546,38 +2192,237 @@ export default function HomebaseScreen({ navigation }: Props) {
   );
 
   return (
-    <View style={styles.screen}>
-      <ScrollView
-        ref={scrollRef}
-        contentContainerStyle={[styles.container, { paddingBottom: 80 + keyboardHeight }]}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-      >
-        {authLoading ? (
-          <View style={{ marginTop: 24, alignItems: "center" }}>
-            <ActivityIndicator />
-          </View>
-        ) : !session && !SCREENSHOT_MODE ? (
-          <View style={styles.card}>
-            <View style={styles.cardTitleRow}>
-              <View style={[styles.cardAccent, { backgroundColor: theme.colors.sage }]} />
-              <Text style={styles.cardTitle}>Welcome to Homebase</Text>
-            </View>
-            <Text style={styles.helperText}>
-              Sign in with Apple to sync your Homebase across iPhone and iPad.
+  <KeyboardAvoidingView
+    style={styles.screen}
+    behavior={Platform.OS === "ios" ? "padding" : undefined}
+    keyboardVerticalOffset={Platform.OS === "ios" ? 0 : 0}
+  >
+    <ScrollView
+      ref={scrollRef}
+      contentContainerStyle={[
+        styles.container,
+        { paddingBottom: 80 + keyboardHeight, flexGrow: 1 },
+      ]}
+      keyboardShouldPersistTaps="handled"
+      keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+    >
+        {authLoading && !SCREENSHOT_MODE ? (
+  <View style={styles.authPage}>
+    <ActivityIndicator />
+  </View>
+) : !session && !SCREENSHOT_MODE ? (
+  <View style={styles.welcomeWrap}>
+  <View style={styles.welcomeHero}>
+  <Image
+    source={require("../../assets/login-hero.jpg")}
+    style={styles.welcomeHeroImage}
+    resizeMode="cover"
+    accessible
+    accessibilityLabel="Homebase"
+  />
+</View>
+
+  <View style={styles.welcomeContent}>
+    <Text style={styles.welcomeTitle}>Welcome to Homebase</Text>
+    <Text style={styles.welcomeSubtitle}>A calm place for everything your mind is holding.</Text>
+    <Text style={styles.welcomeHelper}>
+      Sign in to save your Homebase and keep it synced across iPhone and iPad.
+    </Text>
+
+    {authError ? <Text style={styles.welcomeError}>{authError}</Text> : null}
+
+    <Pressable
+      onPress={() => {
+        setAuthMode("apple");
+        signInWithApple().catch(() => {});
+      }}
+      disabled={authBusy}
+      style={({ pressed }) => [
+        styles.welcomePrimaryBtn,
+        pressed && { opacity: 0.9 },
+        authBusy && { opacity: 0.6 },
+      ]}
+    >
+      <Text style={styles.welcomePrimaryBtnText}>
+        {authBusy && authMode === "apple" ? "Signing in…" : "Continue with Apple"}
+      </Text>
+    </Pressable>
+
+    <View style={styles.welcomeDividerRow}>
+      <View style={styles.welcomeDivider} />
+      <Text style={styles.welcomeDividerText}>or</Text>
+      <View style={styles.welcomeDivider} />
+    </View>
+
+    <Pressable
+      onPress={() => {
+        setAuthMode("email");
+        setAuthError(null);
+      }}
+      style={({ pressed }) => [styles.welcomeSecondaryBtn, pressed && { opacity: 0.9 }]}
+    >
+      <Text style={styles.welcomeSecondaryBtnText}>Continue with Email</Text>
+    </Pressable>
+
+    {authMode === "email" ? (
+      <View style={{ marginTop: 14 }}>
+        <TextInput
+          value={authEmail}
+          onChangeText={setAuthEmail}
+          placeholder="Email"
+          placeholderTextColor={theme.colors.ink3}
+          autoCapitalize="none"
+          keyboardType="email-address"
+          style={styles.welcomeInput}
+        />
+        <TextInput
+          value={authPassword}
+          onChangeText={setAuthPassword}
+          placeholder="Password"
+          placeholderTextColor={theme.colors.ink3}
+          secureTextEntry
+          style={styles.welcomeInput}
+        />
+
+        <Pressable
+          onPress={() => {
+            setAuthError(null);
+            if (authIsSignUp) signUpWithEmailPassword().catch(() => {});
+            else signInWithEmailPassword().catch(() => {});
+          }}
+          disabled={authBusy || !authEmail.trim() || !authPassword}
+          style={({ pressed }) => [
+            styles.welcomePrimaryBtn,
+            { marginTop: 10 },
+            (authBusy || !authEmail.trim() || !authPassword) && { opacity: 0.6 },
+            pressed && { opacity: 0.9 },
+          ]}
+        >
+          <Text style={styles.welcomePrimaryBtnText}>
+            {authBusy ? "Please wait…" : authIsSignUp ? "Create account" : "Sign in"}
+          </Text>
+        </Pressable>
+
+        <View style={styles.welcomeLinksRow}>
+          <Pressable onPress={() => setAuthIsSignUp((p) => !p)}>
+            <Text style={styles.welcomeLink}>
+              {authIsSignUp ? "Already have an account? Sign in" : "Create an account"}
             </Text>
-            <Pressable
-              onPress={signInWithApple}
-              style={({ pressed }) => [styles.primaryBtn, { marginTop: 14 }, pressed && { opacity: 0.85 }]}
-            >
-              <Text style={styles.primaryBtnText}>Continue with Apple</Text>
-            </Pressable>
-          </View>
-        ) : null}
-        {(session || SCREENSHOT_MODE) ? Header : null}
+          </Pressable>
+
+          <Pressable onPress={() => sendPasswordReset().catch(() => {})}>
+            <Text style={styles.welcomeLink}>Forgot password?</Text>
+          </Pressable>
+
+          <Pressable onPress={() => resendConfirmationEmail().catch(() => {})}>
+            <Text style={styles.welcomeLink}>Resend confirmation</Text>
+          </Pressable>
+        </View>
+      </View>
+    ) : null}
+
+    <View style={styles.welcomeLegalRow}>
+  <Pressable onPress={() => Linking.openURL(TERMS_URL).catch(() => {})}>
+    <Text style={styles.welcomeLegalLink}>Terms</Text>
+  </Pressable>
+  <Text style={styles.welcomeLegalDot}>•</Text>
+  <Pressable onPress={() => Linking.openURL(PRIVACY_URL).catch(() => {})}>
+    <Text style={styles.welcomeLegalLink}>Privacy</Text>
+  </Pressable>
+  <Text style={styles.welcomeLegalDot}>•</Text>
+  <Pressable onPress={() => Linking.openURL(DELETE_ACCOUNT_URL).catch(() => {})}>
+    <Text style={styles.welcomeLegalLink}>Delete account</Text>
+  </Pressable>
+</View>
+  </View>
+</View>
+) : session && !effectiveEntitled && !SCREENSHOT_MODE ? (
+  <View style={styles.authPage}>
+    <View style={styles.paywallCard}>
+      <View style={styles.cardTitleRow}>
+        <View style={[styles.cardAccent, { backgroundColor: theme.colors.sage }]} />
+        <Text style={styles.authTitle}>Homebase</Text>
+      </View>
+
+      <Text style={styles.paywallSubtitle}>Unlock full access</Text>
+      <Text style={styles.paywallBody}>
+        Continue to Apple’s secure subscription screen to subscribe or manage your plan.
+      </Text>
+
+      <Pressable
+        onPress={openNativeSubscriptionPaywall}
+        hitSlop={12}
+        style={({ pressed }) => [
+          styles.primaryBtn,
+          styles.paywallBtn,
+          pressed && { opacity: 0.85 },
+        ]}
+      >
+        <Text style={styles.primaryBtnText}>Continue</Text>
+      </Pressable>
+
+      {billingError ? <Text style={styles.paywallError}>{billingError}</Text> : null}
+
+      <Pressable
+        onPress={restorePurchases}
+        hitSlop={10}
+        style={({ pressed }) => [
+          styles.viewAllBtn,
+          { alignSelf: "center", marginTop: 10 },
+          pressed && styles.pressed,
+        ]}
+      >
+        <Text style={styles.viewAllText}>Restore Purchases</Text>
+      </Pressable>
+
+      <Pressable
+        onPress={() => Linking.openURL("https://apps.apple.com/account/subscriptions").catch(() => {})}
+        hitSlop={10}
+        style={({ pressed }) => [
+          styles.viewAllBtn,
+          { alignSelf: "center", marginTop: 6 },
+          pressed && styles.pressed,
+        ]}
+      >
+        <Text style={styles.viewAllText}>Manage Subscriptions</Text>
+      </Pressable>
+
+      <View style={styles.paywallLinksRow}>
+        <Pressable
+          onPress={() => Linking.openURL(PRIVACY_URL).catch(() => {})}
+          hitSlop={10}
+          style={({ pressed }) => pressed && { opacity: 0.75 }}
+        >
+          <Text style={styles.paywallLink}>Privacy</Text>
+        </Pressable>
+
+        <Text style={styles.paywallDot}>•</Text>
+
+        <Pressable
+          onPress={() => Linking.openURL(DELETE_ACCOUNT_URL).catch(() => {})}
+          hitSlop={10}
+          style={({ pressed }) => pressed && { opacity: 0.75 }}
+        >
+          <Text style={styles.paywallLink}>Delete account</Text>
+        </Pressable>
+
+        <Text style={styles.paywallDot}>•</Text>
+
+        <Pressable
+          onPress={() => Linking.openURL(TERMS_URL).catch(() => {})}
+          hitSlop={10}
+          style={({ pressed }) => pressed && { opacity: 0.75 }}
+        >
+          <Text style={styles.paywallLink}>Terms</Text>
+        </Pressable>
+      </View>
+    </View>
+  </View>
+) : null}
+        {((session && effectiveEntitled) || SCREENSHOT_MODE) ? Header : null}
 
         {/* Debug info removed */}
-        {(session || SCREENSHOT_MODE) ? (
+        {((session && effectiveEntitled) || SCREENSHOT_MODE) ? (
           isLandscape ? (
             <View style={styles.landscapeRow}>
               <View style={styles.leftColumn}>
@@ -1657,7 +2502,7 @@ export default function HomebaseScreen({ navigation }: Props) {
           </View>
         </View>
       ) : null}
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -1863,6 +2708,134 @@ const styles = StyleSheet.create({
   focusBtnText: { color: theme.colors.ink, ...theme.type.bold, opacity: 0.8 },
 
   moreText: { marginTop: 2, color: theme.colors.ink3, ...theme.type.ui },
+
+  welcomeWrap: {
+  paddingHorizontal: 16,
+  paddingTop: 14,
+  paddingBottom: 18,
+},
+welcomeHero: {
+  height: 190,
+  borderRadius: 18,
+  overflow: "hidden",
+  backgroundColor: theme.colors.softFill,
+  borderWidth: 1,
+  borderColor: theme.colors.border,
+  alignItems: "center",
+  justifyContent: "center",
+},
+
+welcomeHeroImage: {
+  width: "100%",
+  height: "100%",
+},
+
+welcomeHeroInner: {
+  flex: 1,
+  backgroundColor: theme.colors.sage,
+  opacity: 0.22,
+},
+
+welcomeContent: {
+  marginTop: 16,
+  paddingHorizontal: 2,
+},
+welcomeTitle: {
+  fontSize: 30,
+  fontWeight: "700",
+  color: theme.colors.ink,
+},
+welcomeSubtitle: {
+  marginTop: 8,
+  fontSize: 16,
+  lineHeight: 22,
+  color: theme.colors.ink2,
+},
+welcomeHelper: {
+  marginTop: 8,
+  fontSize: 14,
+  lineHeight: 20,
+  color: theme.colors.ink3,
+},
+welcomeError: {
+  marginTop: 10,
+  color: "#B3261E",
+},
+welcomePrimaryBtn: {
+  marginTop: 16,
+  height: 54,
+  borderRadius: 28,
+  alignItems: "center",
+  justifyContent: "center",
+  backgroundColor: theme.colors.sage,
+},
+welcomePrimaryBtnText: {
+  color: theme.colors.ink,
+  fontSize: 16,
+  fontWeight: "700",
+},
+welcomeDividerRow: {
+  flexDirection: "row",
+  alignItems: "center",
+  gap: 10,
+  marginTop: 14,
+},
+welcomeDivider: {
+  flex: 1,
+  height: 1,
+  backgroundColor: theme.colors.hairline,
+},
+welcomeDividerText: {
+  color: theme.colors.ink3,
+  fontSize: 12,
+},
+welcomeSecondaryBtn: {
+  marginTop: 14,
+  height: 54,
+  borderRadius: 28,
+  alignItems: "center",
+  justifyContent: "center",
+  backgroundColor: theme.colors.card,
+  borderWidth: 1,
+  borderColor: theme.colors.border,
+},
+welcomeSecondaryBtnText: {
+  color: theme.colors.ink,
+  fontSize: 16,
+  fontWeight: "700",
+},
+welcomeInput: {
+  height: 52,
+  borderRadius: 14,
+  paddingHorizontal: 14,
+  borderWidth: 1,
+  borderColor: theme.colors.border,
+  backgroundColor: theme.colors.card,
+  color: theme.colors.ink,
+  marginBottom: 10,
+},
+welcomeLinksRow: {
+  marginTop: 10,
+  gap: 10,
+},
+welcomeLink: {
+  color: theme.colors.ink2,
+  textDecorationLine: "underline",
+},
+welcomeLegalRow: {
+  flexDirection: "row",
+  justifyContent: "center",
+  alignItems: "center",
+  gap: 10,
+  marginTop: 18,
+},
+welcomeLegalLink: {
+  color: theme.colors.ink2,
+  textDecorationLine: "underline",
+},
+welcomeLegalDot: {
+  color: theme.colors.ink3,
+},
 
   // Buttons (theme-based)
   primaryBtn: {
@@ -2103,6 +3076,106 @@ const styles = StyleSheet.create({
   rhythmSaveBtn: { marginTop: 0 },
 
   rhythmMicrocopy: { marginTop: 10, fontSize: 13, color: theme.colors.ink3, ...theme.type.body },
+
+authPage: {
+  flex: 1,
+  justifyContent: "center",
+  alignItems: "center",
+  padding: 24,
+},
+authCard: {
+  width: "100%",
+  maxWidth: 520,
+  backgroundColor: theme.colors.card,
+  borderRadius: 18,
+  padding: 18,
+  borderWidth: 1,
+  borderColor: theme.colors.border,
+},
+authTitle: {
+  fontSize: 22,
+  fontWeight: "700",
+  color: theme.colors.ink,
+  marginLeft: 8,
+},
+authSubtitle: {
+  marginTop: 10,
+  fontSize: 16,
+  fontWeight: "600",
+  color: theme.colors.ink,
+},
+authBody: {
+  marginTop: 8,
+  fontSize: 14,
+  lineHeight: 20,
+  color: theme.colors.ink2,
+},
+authTrust: {
+  marginTop: 12,
+  fontSize: 13,
+  color: theme.colors.ink3,
+  textAlign: "center",
+},
+  paywallCard: {
+    width: "100%",
+    maxWidth: 520,
+    backgroundColor: theme.colors.card,
+    borderRadius: 18,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+  },
+  paywallSubtitle: {
+    marginTop: 10,
+    fontSize: 16,
+    fontWeight: "600",
+    color: theme.colors.ink,
+  },
+  paywallBody: {
+    marginTop: 8,
+    fontSize: 14,
+    lineHeight: 20,
+    color: theme.colors.ink2,
+  },
+  paywallError: {
+    marginTop: 10,
+    fontSize: 13,
+    color: theme.colors.ink,
+  },
+  paywallBtn: {
+    marginTop: 10,
+    paddingVertical: 14,
+  },
+  paywallBtnRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  paywallBtnMeta: {
+    fontSize: 13,
+    color: theme.colors.ink2,
+  },
+  paywallBtnNote: {
+    marginTop: 6,
+    fontSize: 12,
+    color: theme.colors.ink3,
+  },
+  paywallLinksRow: {
+    marginTop: 14,
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  paywallLink: {
+    fontSize: 13,
+    color: theme.colors.ink2,
+    textDecorationLine: "underline",
+  },
+  paywallDot: {
+    marginHorizontal: 10,
+    fontSize: 13,
+    color: theme.colors.ink3,
+  },
 
   // Confetti
   confettiWrap: {
