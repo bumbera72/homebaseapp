@@ -4,9 +4,9 @@ import UIKit
 @objc(SubscriptionPaywallModule)
 class SubscriptionPaywallModule: NSObject {
 
-  @objc static func requiresMainQueueSetup() -> Bool { true }
+  @objc static func requiresMainQueueSetup() -> Bool { false }
 
-  @objc func present() {
+  @objc(present) func present() {
     DispatchQueue.main.async {
       guard #available(iOS 16.0, *) else { return }
 
@@ -19,7 +19,12 @@ class SubscriptionPaywallModule: NSObject {
         .first { $0.isKeyWindow }?
         .rootViewController
 
-      root?.present(vc, animated: true)
+      var top = root
+      while let presented = top?.presentedViewController {
+        top = presented
+      }
+
+      top?.present(vc, animated: true)
     }
   }
 }
