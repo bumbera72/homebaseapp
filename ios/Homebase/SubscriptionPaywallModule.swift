@@ -8,7 +8,7 @@ class SubscriptionPaywallModule: NSObject {
 
   @objc(present) func present() {
     DispatchQueue.main.async {
-      guard #available(iOS 16.0, *) else { return }
+      guard #available(iOS 17.0, *) else { return }
 
       let vc = SubscriptionPaywallViewController()
       vc.modalPresentationStyle = .pageSheet

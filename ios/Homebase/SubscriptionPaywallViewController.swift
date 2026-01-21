@@ -1,7 +1,7 @@
 import UIKit
 import SwiftUI
 
-@available(iOS 16.0, *)
+@available(iOS 17.0, *)
 class SubscriptionPaywallViewController: UIViewController {
   override func viewDidLoad() {
     super.viewDidLoad()
