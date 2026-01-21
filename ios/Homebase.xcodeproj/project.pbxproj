@@ -12,6 +12,10 @@
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
 		48ABD5C2186FE00C5BA689EA /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5142A1E9279340515738AABD /* ExpoModulesProvider.swift */; };
 		5A42E5B77C03CCB78C9A8C4E /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A284D2AB78AF3C0ACC7E5513 /* PrivacyInfo.xcprivacy */; };
+		A246ECE62F21319400B15B8B /* SubscriptionPaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A246ECE42F21319400B15B8B /* SubscriptionPaywallView.swift */; };
+		A246ECE72F21319400B15B8B /* SubscriptionPaywallModule.m in Sources */ = {isa = PBXBuildFile; fileRef = A246ECE32F21319400B15B8B /* SubscriptionPaywallModule.m */; };
+		A246ECE82F21319400B15B8B /* SubscriptionPaywallViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A246ECE52F21319400B15B8B /* SubscriptionPaywallViewController.swift */; };
+		A246ECEA2F2132C200B15B8B /* SubscriptionPaywallModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = A246ECE92F2132C200B15B8B /* SubscriptionPaywallModule.swift */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
 /* End PBXBuildFile section */
@@ -22,6 +26,10 @@
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = Homebase/Info.plist; sourceTree = "<group>"; };
 		5142A1E9279340515738AABD /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-Homebase/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		8DBAD5513A3E832FD391308E /* Pods-Homebase.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Homebase.release.xcconfig"; path = "Target Support Files/Pods-Homebase/Pods-Homebase.release.xcconfig"; sourceTree = "<group>"; };
+		A246ECE32F21319400B15B8B /* SubscriptionPaywallModule.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SubscriptionPaywallModule.m; sourceTree = "<group>"; };
+		A246ECE42F21319400B15B8B /* SubscriptionPaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionPaywallView.swift; sourceTree = "<group>"; };
+		A246ECE52F21319400B15B8B /* SubscriptionPaywallViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionPaywallViewController.swift; sourceTree = "<group>"; };
+		A246ECE92F2132C200B15B8B /* SubscriptionPaywallModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionPaywallModule.swift; sourceTree = "<group>"; };
 		A284D2AB78AF3C0ACC7E5513 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = Homebase/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = Homebase/SplashScreen.storyboard; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
@@ -47,6 +55,10 @@
 		13B07FAE1A68108700A75B9A /* Homebase */ = {
 			isa = PBXGroup;
 			children = (
+				A246ECE92F2132C200B15B8B /* SubscriptionPaywallModule.swift */,
+				A246ECE32F21319400B15B8B /* SubscriptionPaywallModule.m */,
+				A246ECE42F21319400B15B8B /* SubscriptionPaywallView.swift */,
+				A246ECE52F21319400B15B8B /* SubscriptionPaywallViewController.swift */,
 				F11748412D0307B40044C1D9 /* AppDelegate.swift */,
 				F11748442D0722820044C1D9 /* Homebase-Bridging-Header.h */,
 				BB2F792B24A3F905000567C9 /* Supporting */,
@@ -329,7 +341,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
+				A246ECE62F21319400B15B8B /* SubscriptionPaywallView.swift in Sources */,
+				A246ECE72F21319400B15B8B /* SubscriptionPaywallModule.m in Sources */,
+				A246ECE82F21319400B15B8B /* SubscriptionPaywallViewController.swift in Sources */,
 				48ABD5C2186FE00C5BA689EA /* ExpoModulesProvider.swift in Sources */,
+				A246ECEA2F2132C200B15B8B /* SubscriptionPaywallModule.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
