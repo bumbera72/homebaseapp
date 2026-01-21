@@ -56,5 +56,14 @@ target 'Homebase' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
+
+    # Fix Xcode/Xcode Cloud build failures like:
+    # "Sandbox: find(...) deny(1) file-read-data .../ios/Pods".
+    # Ensure Pods run scripts are not blocked by User Script Sandboxing.
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |build_config|
+        build_config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
+      end
+    end
   end
 end
